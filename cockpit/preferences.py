@@ -9,6 +9,7 @@ simply unreachable on a short display with no way to scroll to them.
 """
 from __future__ import annotations
 
+import copy
 import subprocess
 import time
 from pathlib import Path
@@ -19,10 +20,19 @@ gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk  # noqa: E402
 
 from . import accounts, auth, bars, config, desktop  # noqa: E402
+from . import label as panel_label  # noqa: E402  (a local called label lives in __init__)
 from .accounts import DATA_DIR  # noqa: E402
 from .i18n import default_currency, t  # noqa: E402
 
 SPACING = 8
+
+# what the label previews show when Settings opens before the first refresh
+SAMPLE = {
+    "account": {"id": "", "label": ""},
+    "block": {"pct": 42.0, "usd": 18.5, "remaining_s": 2 * 3600 + 10 * 60, "eta_limit_s": 95 * 60},
+    "week": {"pct": 61.0, "usd": 240.0, "remaining_s": 3 * 86400},
+    "today_gauge": {"pct": 35.0, "usd": 52.0},
+}
 
 
 def _tilde(path) -> str:
@@ -50,10 +60,11 @@ def _parse_number(text: str) -> float | None:
 
 
 class Preferences(Gtk.Window):
-    def __init__(self, on_saved=None) -> None:
+    def __init__(self, on_saved=None, preview: dict | None = None) -> None:
         super().__init__(title=t("prefs_title"))
         self.cfg = config.load()
         self.on_saved = on_saved
+        self.preview = preview or SAMPLE
         self.set_default_size(520, 540)
         self.set_border_width(16)
         self.set_position(Gtk.WindowPosition.CENTER)
@@ -79,9 +90,13 @@ class Preferences(Gtk.Window):
         self.language = self._combo(general, 2, t("language_label"), "language", [
             ("auto", t("auto")), ("en", "English"),
             ("pt", "Português"), ("es", "Español")])
-        self.show_cost = Gtk.Switch(halign=Gtk.Align.START)
-        self.show_cost.set_active(bool(self.cfg.get("tray_show_cost", True)))
-        self._attach(general, 3, t("show_cost"), self.show_cost)
+        # each option shows what the panel would read, with the numbers it has
+        # now, and follows the window picked above
+        self.label_format = Gtk.ComboBoxText()
+        self._attach(general, 3, t("label_format"), self.label_format)
+        self._fill_label_formats(panel_label.format_of(self.cfg))
+        self.metric.connect("changed", lambda *_: self._fill_label_formats(
+            self.label_format.get_active_id()))
         # 0 is a real answer here - it takes the list out of the menu, the
         # dashboard and the report at once
         self.recent = self._spin(general, 4, t("recent_count"),
@@ -151,6 +166,11 @@ class Preferences(Gtk.Window):
         save.get_style_context().add_class("suggested-action")
         save.connect("clicked", self._save)
         buttons.pack_end(save, False, False, 0)
+        # saves and repaints the tray with the window still open, so a label
+        # format can be tried on the panel before settling on one
+        apply = Gtk.Button(label=t("apply"))
+        apply.connect("clicked", self._apply)
+        buttons.pack_end(apply, False, False, 0)
 
     # ---------- accounts ----------
     def _fill_accounts(self) -> None:
@@ -224,7 +244,7 @@ class Preferences(Gtk.Window):
             accounts.rehome(account)     # a renamed default takes its history
         self._fill_accounts()
         if self.on_saved:
-            self.on_saved(cfg)           # the tray picks it up without a restart
+            self.on_saved(copy.deepcopy(cfg))   # the tray picks it up without a restart
 
     def _detect_accounts(self, *_a) -> None:
         cfg = config.load()
@@ -361,6 +381,16 @@ class Preferences(Gtk.Window):
             self._attach(grid, row, "", Gtk.Label(label=t("plan_from_credentials"),
                                                   halign=Gtk.Align.START, xalign=0, wrap=True))
 
+    def _fill_label_formats(self, current: str) -> None:
+        metric = self.metric.get_active_id()
+        if metric == "none":
+            metric = "block"            # still worth showing what each one reads
+        self.label_format.remove_all()
+        for fmt in panel_label.FORMATS:
+            text = panel_label.compose(fmt, metric, self.preview, cfg=self.cfg) or t("label_empty")
+            self.label_format.append(fmt, f"{panel_label.title(fmt)}   {text}")
+        self.label_format.set_active_id(current)
+
     def _entry(self, grid: Gtk.Grid, row: int, label: str, value: str) -> Gtk.Entry:
         entry = Gtk.Entry(text=value)
         self._attach(grid, row, label, entry)
@@ -368,11 +398,17 @@ class Preferences(Gtk.Window):
 
     # ---------- persistence ----------
     def _save(self, *_a) -> None:
+        if self._apply():
+            self.close()                       # kept open on an autostart error
+
+    def _apply(self, *_a) -> bool:
         cfg = self.cfg
         cfg["tray_metric"] = self.metric.get_active_id()
         cfg["menu_bar_style"] = self.style.get_active_id()
         cfg["language"] = self.language.get_active_id()
-        cfg["tray_show_cost"] = self.show_cost.get_active()
+        cfg["tray_label"] = self.label_format.get_active_id()
+        # kept in step for an older version reading the same file
+        cfg["tray_show_cost"] = "cost" in cfg["tray_label"]
         cfg["recent_sessions"] = int(self.recent.get_value())
         cfg["refresh_seconds"] = int(self.refresh_seconds.get_value())
         cfg["dashboard_port"] = int(self.port.get_value())
@@ -398,10 +434,9 @@ class Preferences(Gtk.Window):
 
         config.save(cfg)
         if self.on_saved:
-            self.on_saved(cfg)
-        if not self._apply_autostart():
-            return                             # keep the window open on the error
-        self.close()
+            # a copy: the window stays open after Apply and keeps editing its own
+            self.on_saved(copy.deepcopy(cfg))
+        return self._apply_autostart()
 
     def _apply_autostart(self) -> bool:
         wanted = self.autostart.get_active()
