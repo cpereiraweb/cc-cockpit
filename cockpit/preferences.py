@@ -11,15 +11,16 @@ from __future__ import annotations
 
 import copy
 import subprocess
+import threading
 import time
 from pathlib import Path
 
 import gi
 
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gtk  # noqa: E402
+from gi.repository import GLib, Gtk  # noqa: E402
 
-from . import accounts, auth, bars, config, desktop  # noqa: E402
+from . import accounts, auth, bars, config, desktop, rate  # noqa: E402
 from . import label as panel_label  # noqa: E402  (a local called label lives in __init__)
 from .accounts import DATA_DIR  # noqa: E402
 from .i18n import default_currency, t  # noqa: E402
@@ -145,7 +146,32 @@ class Preferences(Gtk.Window):
         money = self._section(plan_page, t("currency_title"))
         self.currency_code = self._entry(money, 0, t("currency_code"), currency.get("code", ""))
         self.currency_symbol = self._entry(money, 1, t("currency_symbol"), currency.get("symbol", ""))
-        self.currency_rate = self._entry(money, 2, t("currency_rate"), _number(currency.get("rate")))
+        self.currency_rate = Gtk.Entry(text=_number(currency.get("rate")))
+        # the only network call in cc-cockpit, and only on this click - see rate.py
+        self.rate_button = Gtk.Button(label=t("rate_fetch"))
+        self.rate_button.connect("clicked", self._fetch_rate)
+        rate_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=SPACING)
+        rate_row.pack_start(self.currency_rate, True, True, 0)
+        rate_row.pack_start(self.rate_button, False, False, 0)
+        self._attach(money, 2, t("currency_rate"), rate_row)
+        self.rate_status = Gtk.Label(halign=Gtk.Align.START, xalign=0, wrap=True)
+        self.rate_status.get_style_context().add_class("dim-label")
+        money.attach(self.rate_status, 1, 3, 1, 1)
+        # PTAX is reais per dollar: the button means nothing for another currency
+        self.currency_code.connect("changed", self._rate_button_state)
+        self._rate_button_state()
+
+        # out of the way on purpose: only for the day the address moves
+        advanced = Gtk.Expander(label=t("advanced"))
+        plan_page.pack_start(advanced, False, False, 0)
+        url_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=SPACING, margin_start=6)
+        url_row.pack_start(Gtk.Label(label=t("rate_url")), False, False, 0)
+        self.rate_url = Gtk.Entry(text=rate.url_for(self.cfg))
+        url_row.pack_start(self.rate_url, True, True, 0)
+        self.rate_default = Gtk.Button(label=t("default"))
+        self.rate_default.connect("clicked", lambda *_: self.rate_url.set_text(rate.DEFAULT_URL))
+        url_row.pack_start(self.rate_default, False, False, 0)
+        advanced.add(url_row)
 
         alerts = self._section(limits_page, t("alerts"))
         self.warn = self._spin(alerts, 0, t("warn_at"), self.cfg.get("warn_pct", 70), 1, 100)
@@ -391,6 +417,36 @@ class Preferences(Gtk.Window):
             self.label_format.append(fmt, f"{panel_label.title(fmt)}   {text}")
         self.label_format.set_active_id(current)
 
+    # ---------- dollar rate ----------
+    def _rate_button_state(self, *_a) -> None:
+        self.rate_button.set_sensitive(self.currency_code.get_text().strip().upper() == "BRL")
+
+    def _fetch_rate(self, *_a) -> None:
+        url = self.rate_url.get_text().strip() or rate.DEFAULT_URL
+        self.rate_button.set_sensitive(False)
+        self.rate_status.set_text(t("rate_fetching"))
+
+        def work() -> None:
+            try:
+                result, error = rate.fetch(url), None
+            except rate.RateError as exc:
+                result, error = None, str(exc)
+            GLib.idle_add(self._rate_done, result, error)
+
+        # a slow reply must not freeze the window
+        threading.Thread(target=work, daemon=True).start()
+
+    def _rate_done(self, result, error) -> bool:
+        """Fills the field on success; the value is saved with the rest, not now."""
+        if result:
+            value, date = result
+            self.currency_rate.set_text(f"{value:g}")
+            self.rate_status.set_text(t("rate_from", date=date))
+        else:
+            self.rate_status.set_text(t("rate_failed", why=error))
+        self._rate_button_state()
+        return False                          # one-shot for GLib.idle_add
+
     def _entry(self, grid: Gtk.Grid, row: int, label: str, value: str) -> Gtk.Entry:
         entry = Gtk.Entry(text=value)
         self._attach(grid, row, label, entry)
@@ -418,13 +474,14 @@ class Preferences(Gtk.Window):
         }
         cfg["plan_monthly_usd"] = _parse_number(self.plan_cost.get_text())
 
-        rate = _parse_number(self.currency_rate.get_text())
+        per_usd = _parse_number(self.currency_rate.get_text())
         symbol = self.currency_symbol.get_text().strip()
         cfg["local_currency"] = {
             "code": self.currency_code.get_text().strip().upper(),
             "symbol": symbol,
-            "rate": rate,
-        } if rate and symbol else None
+            "rate": per_usd,
+        } if per_usd and symbol else None
+        cfg["rate_url"] = rate.stored_url(self.rate_url.get_text())
 
         if self.primary is not None:
             cfg["primary_account"] = self.primary.get_active_id()
