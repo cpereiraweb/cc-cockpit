@@ -99,7 +99,7 @@ class Tray:
         self.seq = 0
         self.data: dict | None = None
         self.ind = AppIndicator.Indicator.new(
-            APP_ID, "utilities-system-monitor",
+            APP_ID, APP_ID,   # the installed app icon, until the first ring is drawn
             AppIndicator.IndicatorCategory.SYSTEM_SERVICES,
         )
         self.ind.set_icon_theme_path(str(icon.ICON_DIR))
