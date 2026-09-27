@@ -20,7 +20,7 @@ import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import GLib, Gtk  # noqa: E402
 
-from . import accounts, auth, bars, config, desktop, rate  # noqa: E402
+from . import __version__, accounts, auth, bars, config, desktop, rate  # noqa: E402
 from . import label as panel_label  # noqa: E402  (a local called label lives in __init__)
 from .accounts import DATA_DIR  # noqa: E402
 from .i18n import default_currency, t  # noqa: E402
@@ -62,7 +62,9 @@ def _parse_number(text: str) -> float | None:
 
 class Preferences(Gtk.Window):
     def __init__(self, on_saved=None, preview: dict | None = None) -> None:
-        super().__init__(title=t("prefs_title"))
+        # the version answering, as the dashboard shows it - with a personal
+        # build beside the packaged one, which one opened is not obvious
+        super().__init__(title=f"{t('prefs_title')} · v{__version__}")
         self.cfg = config.load()
         self.on_saved = on_saved
         self.preview = preview or SAMPLE

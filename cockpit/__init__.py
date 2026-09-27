@@ -1,3 +1,3 @@
 """cc-cockpit - Claude Code usage panel."""
 
-__version__ = "0.5.2+cp2"
+__version__ = "0.5.2+cp3"
